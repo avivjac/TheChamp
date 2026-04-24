@@ -28,7 +28,7 @@ def whatsapp_reply():
     try:
         # 2. שולחים את ההודעה לקלוד שיחשוב עליה
         claude_response = client.messages.create(
-            model="claude-haiku-4-5-20251001",  # ✅ fast & cheap, perfect for WhatsApp
+            model="claude-haiku-4-5",  # ✅ fast & cheap, perfect for WhatsApp
             max_tokens=350, # מגביל את אורך התשובה כדי לא לבזבז לך סתם כסף
             system=system_prompt,
             messages=[
