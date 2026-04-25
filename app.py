@@ -1,6 +1,8 @@
 import os
 import logging
+import logging.handlers
 import datetime
+import requests as http_requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from anthropic import Anthropic
@@ -11,12 +13,26 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-# ── Logging setup ──────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  [%(levelname)s]  %(message)s",
+# ── Logging setup — console + rotating file ───────────────────────────────────
+_log_formatter = logging.Formatter(
+    fmt="%(asctime)s  [%(levelname)s]  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+# Console handler (existing behaviour)
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+
+# File handler — rotates at 5 MB, keeps last 3 files
+_file_handler = logging.handlers.RotatingFileHandler(
+    filename="app.log",
+    maxBytes=5 * 1024 * 1024,  # 5 MB
+    backupCount=3,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(_log_formatter)
+
+logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _file_handler])
 logger = logging.getLogger(__name__)
 
 # ── Google Calendar API scope — read + write access ────────────────────────────
@@ -30,6 +46,11 @@ api_key = os.environ.get("ANTHROPIC_API_KEY")
 if not api_key:
     raise ValueError("ANTHROPIC_API_KEY not found in .env — check the file!")
 logger.info("Anthropic API key found")
+
+rapidapi_key = os.environ.get("FOOTBALL_API_KEY")
+if not rapidapi_key:
+    raise ValueError("FOOTBALL_API_KEY not found in .env — check the file!")
+logger.info("RapidAPI (football) key found")
 
 app = Flask(__name__)
 
@@ -56,6 +77,18 @@ tools = [
             "type": "object",
             "properties": {}
         }
+    },
+    {
+        "name": "get_real_madrid_updates",
+        "description": (
+            "Fetch the latest Real Madrid match results and upcoming fixtures "
+            "from a live football data API. Use this whenever the user asks "
+            "about Real Madrid matches, scores, results, fixtures, or news."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {}
+        }
     }
 ]
 
@@ -70,53 +103,60 @@ def whatsapp_reply():
     msg = resp.message()
 
     try:
-        # 2. Send the message to Claude for processing
+        # 2. Send the message to Claude (with tools enabled)
         logger.info("Sending message to Claude...")
-        claude_response = client.messages.create(
+        messages = [{"role": "user", "content": incoming_msg}]
+        response = client.messages.create(
             model="claude-haiku-4-5",  # Fast & cheap — perfect for WhatsApp
-            max_tokens=350,            # Limit response length to keep costs low
+            max_tokens=512,
             system=system_prompt,
-            messages=[
-                {"role": "user", "content": incoming_msg}
-            ]
+            tools=tools,
+            messages=messages,
         )
 
-        # 2. הבדיקה הקריטית: האם קלוד רוצה להפעיל כלי?
-        if response.stop_reason == "tool_use":
-            # מוצאים איזה כלי הוא ביקש
+        # 3. Tool-use loop — Claude may request one or more tools
+        while response.stop_reason == "tool_use":
             tool_use = next(block for block in response.content if block.type == "tool_use")
-            
-            if tool_use.name == "get_calendar_events":
-                # מפעילים את הפונקציה שכתבנו קודם
-                observation = get_upcoming_events()
-                
-                # שולחים לקלוד חזרה את התוצאה כדי שינסח תשובה
-                response = client.messages.create(
-                    model="claude-haiku-4-5",
-                    max_tokens=512,
-                    system=system_prompt,
-                    tools=tools,
-                    messages=[
-                        {"role": "user", "content": incoming_msg},
-                        {"role": "assistant", "content": response.content},
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": tool_use.id,
-                                    "content": observation,
-                                }
-                            ],
-                        },
-                    ],
-                )
+            logger.info("Claude requested tool: %s", tool_use.name)
 
-        # 3. Extract the text from Claude's response
-        reply_text = claude_response.content[0].text
+            # Dispatch to the correct tool handler
+            if tool_use.name == "get_calendar_events":
+                observation = get_upcoming_events()
+            elif tool_use.name == "get_real_madrid_updates":
+                observation = get_real_madrid_updates()
+            else:
+                observation = f"Tool '{tool_use.name}' is not implemented."
+
+            logger.info("Tool result: %s", observation[:120])
+
+            # Append assistant's tool-use turn + the tool result, then re-call Claude
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": observation,
+                    }
+                ],
+            })
+            response = client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=512,
+                system=system_prompt,
+                tools=tools,
+                messages=messages,
+            )
+
+        # 4. Extract the final text reply
+        reply_text = next(
+            (block.text for block in response.content if hasattr(block, "text")),
+            "I couldn't generate a reply — please try again."
+        )
         logger.info("Claude replied: %s", reply_text)
 
-        # 4. Pass the text to Twilio to send back via WhatsApp
+        # 5. Pass the text to Twilio to send back via WhatsApp
         msg.body(reply_text)
 
     except Exception as e:
@@ -124,6 +164,66 @@ def whatsapp_reply():
         msg.body("Sorry, something went wrong on my end. Check the logs for details.")
 
     return str(resp)
+
+
+# ── Real Madrid football updates helper ───────────────────────────────────────
+def _extract_list(obj):
+    """Walk a JSON value until we find a list (BFS over dict values)."""
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        # Prefer well-known keys first
+        for key in ("matches", "response", "data", "events", "fixtures", "results"):
+            if key in obj and isinstance(obj[key], list):
+                return obj[key]
+        # Fall back: recurse into all values
+        for val in obj.values():
+            result = _extract_list(val)
+            if result is not None:
+                return result
+    return None
+
+
+def get_real_madrid_updates():
+    """Fetches the latest Real Madrid matches (results + upcoming fixtures) from
+    the Free API Live Football Data on RapidAPI."""
+    url = "https://free-api-live-football-data.p.rapidapi.com/football-matches-search"
+    headers = {
+        "x-rapidapi-host": "free-api-live-football-data.p.rapidapi.com",
+        "x-rapidapi-key": rapidapi_key,
+    }
+    params = {"search": "Real Madrid"}
+
+    logger.info("Calling RapidAPI football search for Real Madrid")
+    try:
+        resp = http_requests.get(url, headers=headers, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.error("Football API error: %s", exc)
+        return "Couldn't fetch Real Madrid data right now — try again later."
+
+    # Log the raw response keys so we can debug future shape changes
+    logger.info("Football API raw response keys: %s", list(data.keys()) if isinstance(data, dict) else type(data).__name__)
+
+    # Robustly extract a list from whatever shape the API returned
+    matches = _extract_list(data)
+
+    if not matches:
+        logger.warning("No match list found in API response: %s", str(data)[:300])
+        return "No Real Madrid matches found in the API response."
+
+    logger.info("Found %d match entries from football API", len(matches))
+    lines = ["⚽ Real Madrid — latest matches:"]
+    for match in matches[:8]:  # cap at 8 to keep the WhatsApp message short
+        home   = match.get("home_name") or match.get("homeTeam", {}).get("name", "?")
+        away   = match.get("away_name") or match.get("awayTeam", {}).get("name", "?")
+        score  = match.get("score")     or match.get("result", "vs")
+        date   = match.get("date")      or match.get("event_date", "")
+        status = match.get("status", "") or match.get("event_status", "")
+        lines.append(f"  {home} {score} {away}  [{date}] {status}".strip())
+
+    return "\n".join(lines)
 
 
 # ── Google Calendar helper ─────────────────────────────────────────────────────

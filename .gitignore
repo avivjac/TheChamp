@@ -3,7 +3,14 @@ venv/
 .venv/
 env/
 ENV/
+
+# Secrets
 .env
+
+# JSON credentials / tokens
 .json
 *.json
 json
+
+# Log files
+*.log
