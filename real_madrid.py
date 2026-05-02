@@ -27,16 +27,51 @@ _notified_today: set = set()      # prevents duplicate notifications within a da
 
 
 # ── Google Calendar helpers ───────────────────────────────────────────────────
-def _get_calendar_service():
-    creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-        creds = flow.run_local_server(port=0)
-        with open("token.json", "w") as f:
-            f.write(creds.to_json())
+
+def _ensure_token_file():
+    """Write token.json from GOOGLE_TOKEN_JSON env var when running on a server."""
+    if not os.path.exists("token.json"):
+        token_json = os.environ.get("GOOGLE_TOKEN_JSON")
+        if token_json:
+            with open("token.json", "w") as f:
+                f.write(token_json)
+            logger.info("token.json written from GOOGLE_TOKEN_JSON env var")
+
+
+def get_calendar_service():
+    """
+    Return an authenticated Google Calendar service.
+    Works both locally (reads token.json from disk) and on servers
+    (reads token from GOOGLE_TOKEN_JSON env var, auto-refreshes expired tokens).
+    Never opens a browser — run the OAuth flow locally first.
+    """
+    from google.auth.transport.requests import Request
+
+    _ensure_token_file()
+
+    if not os.path.exists("token.json"):
+        raise RuntimeError(
+            "No Google credentials found. "
+            "Run the app locally first to generate token.json, "
+            "then set GOOGLE_TOKEN_JSON in your deployment env vars."
+        )
+
+    creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open("token.json", "w") as f:
+                f.write(creds.to_json())
+            logger.info("Google credentials refreshed")
+        else:
+            raise RuntimeError("Google credentials are invalid and cannot be refreshed.")
+
     return build("calendar", "v3", credentials=creds)
+
+
+# Keep the private alias so internal calls don't break
+_get_calendar_service = get_calendar_service
 
 
 def _parse_event_dt(start_raw: str) -> datetime.datetime:

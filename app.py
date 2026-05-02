@@ -7,11 +7,6 @@ from twilio.twiml.messaging_response import MessagingResponse
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
-# Google Calendar API imports
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-
 import real_madrid
 import database
 
@@ -36,9 +31,6 @@ _file_handler.setFormatter(_log_formatter)
 
 logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _file_handler])
 logger = logging.getLogger(__name__)
-
-# ── Google Calendar API scope — read + write access ────────────────────────────
-SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 # ── Load environment variables from .env ───────────────────────────────────────
 load_dotenv()
@@ -263,50 +255,29 @@ def whatsapp_reply():
     return str(resp)
 
 
-# ── Google Calendar helper ─────────────────────────────────────────────────────
+# ── Google Calendar helpers ────────────────────────────────────────────────────
 def get_upcoming_events(max_results=10):
-    """Fetches the next `max_results` events from the user's primary Google Calendar."""
-    creds = None
-
-    # token.json stores the access/refresh token after the first OAuth login
-    if os.path.exists('token.json'):
-        logger.info("Loading existing Google credentials from token.json")
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-
-    # If no valid credentials exist, open a browser for the OAuth login flow
-    if not creds or not creds.valid:
-        logger.info("No valid credentials — launching OAuth browser flow")
-        flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-        creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
-        logger.info("New credentials saved to token.json")
-
-    service = build('calendar', 'v3', credentials=creds)
-
-    # Fetch events from now onward (RFC3339 format required by the API)
-    now = datetime.datetime.utcnow().isoformat() + 'Z'
-    logger.info("Fetching up to %d upcoming calendar events", max_results)
-
-    events_result = service.events().list(
-        calendarId='primary', timeMin=now,
-        maxResults=max_results, singleEvents=True,
-        orderBy='startTime'
-    ).execute()
-
-    events = events_result.get('items', [])
-
-    if not events:
-        logger.info("No upcoming events found")
-        return "You have no upcoming events — your schedule is clear!"
-
-    logger.info("Found %d upcoming event(s)", len(events))
-    summary = "Here's what I found in your calendar:\n"
-    for event in events:
-        start = event['start'].get('dateTime', event['start'].get('date'))
-        summary += f"- {event['summary']} at {start}\n"
-
-    return summary
+    """Fetch the next `max_results` events from the user's primary Google Calendar."""
+    try:
+        service = real_madrid.get_calendar_service()
+        now = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+        logger.info("Fetching up to %d upcoming calendar events", max_results)
+        result = service.events().list(
+            calendarId='primary', timeMin=now,
+            maxResults=max_results, singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        events = result.get('items', [])
+        if not events:
+            return "You have no upcoming events — your schedule is clear!"
+        summary = "Here's what I found in your calendar:\n"
+        for event in events:
+            start = event['start'].get('dateTime', event['start'].get('date'))
+            summary += f"- {event['summary']} at {start}\n"
+        return summary
+    except Exception as exc:
+        logger.error("get_upcoming_events failed: %s", exc)
+        return f"❌ Couldn't load calendar: {exc}"
 
 
 def add_calendar_event(title: str, date: str, time: str, duration_minutes: int = 60) -> str:
@@ -314,11 +285,9 @@ def add_calendar_event(title: str, date: str, time: str, duration_minutes: int =
     logger.info("add_calendar_event called: title=%r date=%r time=%r duration=%r",
                 title, date, time, duration_minutes)
     try:
-        # Normalise time → zero-padded HH:MM (handles "9:00", "10:00:00", "21:30", etc.)
         parts = time.strip().split(":")
         time_clean = f"{int(parts[0]):02d}:{parts[1][:2]}"
         start_naive = datetime.datetime.fromisoformat(f"{date.strip()}T{time_clean}")
-        # Treat as local time and attach the system timezone
         start_local = start_naive.astimezone()
         end_local = start_local + datetime.timedelta(minutes=int(duration_minutes))
     except (ValueError, TypeError) as exc:
@@ -326,16 +295,7 @@ def add_calendar_event(title: str, date: str, time: str, duration_minutes: int =
         return f"❌ Couldn't parse date/time (got date='{date}', time='{time}'): {exc}"
 
     try:
-        creds = None
-        if os.path.exists('token.json'):
-            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-        if not creds or not creds.valid:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-            with open('token.json', 'w') as token:
-                token.write(creds.to_json())
-
-        service = build('calendar', 'v3', credentials=creds)
+        service = real_madrid.get_calendar_service()
         event_body = {
             'summary': title,
             'start': {'dateTime': start_local.isoformat()},
@@ -343,9 +303,7 @@ def add_calendar_event(title: str, date: str, time: str, duration_minutes: int =
         }
         created = service.events().insert(calendarId='primary', body=event_body).execute()
         logger.info("Created calendar event '%s': %s", title, created.get('htmlLink'))
-        friendly_time = start_local.strftime("%A %d %b, %H:%M")
-        return f"✅ Added '{title}' on {friendly_time} ({duration_minutes} min)"
-
+        return f"✅ Added '{title}' on {start_local.strftime('%A %d %b, %H:%M')} ({duration_minutes} min)"
     except Exception as exc:
         logger.error("Failed to create calendar event: %s", exc)
         return f"❌ Failed to add event: {exc}"
@@ -358,7 +316,10 @@ def health_check():
     return "✅ TheChamp bot is alive!", 200
 
 
+real_madrid.start_scheduler()
+
 if __name__ == "__main__":
-    logger.info("Starting TheChamp Flask server on port 5000")
-    real_madrid.start_scheduler()
-    app.run(port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    debug = os.environ.get("FLASK_ENV") == "development"
+    logger.info("Starting TheChamp Flask server on port %d (debug=%s)", port, debug)
+    app.run(host="0.0.0.0", port=port, debug=debug, use_reloader=False)
