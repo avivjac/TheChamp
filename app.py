@@ -2,7 +2,6 @@ import os
 import logging
 import logging.handlers
 import datetime
-import requests as http_requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from anthropic import Anthropic
@@ -12,6 +11,8 @@ from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+
+import real_madrid
 
 # ── Logging setup — console + rotating file ───────────────────────────────────
 _log_formatter = logging.Formatter(
@@ -47,25 +48,25 @@ if not api_key:
     raise ValueError("ANTHROPIC_API_KEY not found in .env — check the file!")
 logger.info("Anthropic API key found")
 
-rapidapi_key = os.environ.get("FOOTBALL_API_KEY")
-if not rapidapi_key:
-    raise ValueError("FOOTBALL_API_KEY not found in .env — check the file!")
-logger.info("RapidAPI (football) key found")
-
 app = Flask(__name__)
 
 # ── Connect to Claude (the AI brain) ──────────────────────────────────────────
 client = Anthropic(api_key=api_key)
-system_prompt = (
-    "You are a smart personal assistant on WhatsApp named 'TheChamp'. "
-    "You are Aviv's assistant — a computer science student who loves Real Madrid. "
-    "Always reply short, sharp, and casual (like a friend). Don't over-explain."
-)
 logger.info("Anthropic client initialised")
 
-LALIGA_CODE = 87
-CHAMPIONS_LEAGUE_CODE = 42
 
+def _system_prompt() -> str:
+    today = datetime.date.today().strftime("%A, %d %B %Y")
+    return (
+        f"You are 'TheChamp', Aviv's personal WhatsApp assistant. "
+        f"Aviv is a CS student who loves Real Madrid. "
+        f"Today is {today}. "
+        f"Reply short and casual — like a friend texting back. No bullet lists, no over-explaining. "
+        f"You understand both Hebrew and English; always reply in the same language Aviv wrote in. "
+        f"Use tools proactively: call add_calendar_event whenever Aviv wants to schedule anything, "
+        f"get_calendar_events when he asks about his schedule, "
+        f"and get_real_madrid_updates for anything Real Madrid."
+    )
 
 
 # ── Tool definitions exposed to Claude ────────────────────────────────────────
@@ -89,6 +90,37 @@ tools = [
             "type": "object",
             "properties": {}
         }
+    },
+    {
+        "name": "add_calendar_event",
+        "description": (
+            "Add a new event to the user's Google Calendar. "
+            "Use this when the user asks to add, create, schedule, or remind about something. "
+            "Convert natural language dates ('tomorrow', 'next Monday') to YYYY-MM-DD. "
+            "Convert times to 24-hour HH:MM. If no duration is given, default to 60 minutes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Event title."
+                },
+                "date": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format."
+                },
+                "time": {
+                    "type": "string",
+                    "description": "Start time in 24-hour HH:MM format (local time)."
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "description": "Duration in minutes (default 60)."
+                }
+            },
+            "required": ["title", "date", "time"]
+        }
     }
 ]
 
@@ -107,9 +139,9 @@ def whatsapp_reply():
         logger.info("Sending message to Claude...")
         messages = [{"role": "user", "content": incoming_msg}]
         response = client.messages.create(
-            model="claude-haiku-4-5",  # Fast & cheap — perfect for WhatsApp
-            max_tokens=512,
-            system=system_prompt,
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=_system_prompt(),
             tools=tools,
             messages=messages,
         )
@@ -123,7 +155,15 @@ def whatsapp_reply():
             if tool_use.name == "get_calendar_events":
                 observation = get_upcoming_events()
             elif tool_use.name == "get_real_madrid_updates":
-                observation = get_real_madrid_updates()
+                observation = real_madrid.get_real_madrid_updates()
+            elif tool_use.name == "add_calendar_event":
+                inp = tool_use.input
+                observation = add_calendar_event(
+                    title=inp["title"],
+                    date=inp["date"],
+                    time=inp["time"],
+                    duration_minutes=inp.get("duration_minutes", 60),
+                )
             else:
                 observation = f"Tool '{tool_use.name}' is not implemented."
 
@@ -142,9 +182,9 @@ def whatsapp_reply():
                 ],
             })
             response = client.messages.create(
-                model="claude-haiku-4-5",
-                max_tokens=512,
-                system=system_prompt,
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                system=_system_prompt(),
                 tools=tools,
                 messages=messages,
             )
@@ -164,66 +204,6 @@ def whatsapp_reply():
         msg.body("Sorry, something went wrong on my end. Check the logs for details.")
 
     return str(resp)
-
-
-# ── Real Madrid football updates helper ───────────────────────────────────────
-def _extract_list(obj):
-    """Walk a JSON value until we find a list (BFS over dict values)."""
-    if isinstance(obj, list):
-        return obj
-    if isinstance(obj, dict):
-        # Prefer well-known keys first
-        for key in ("matches", "response", "data", "events", "fixtures", "results"):
-            if key in obj and isinstance(obj[key], list):
-                return obj[key]
-        # Fall back: recurse into all values
-        for val in obj.values():
-            result = _extract_list(val)
-            if result is not None:
-                return result
-    return None
-
-
-def get_real_madrid_updates():
-    """Fetches the latest Real Madrid matches (results + upcoming fixtures) from
-    the Free API Live Football Data on RapidAPI."""
-    url = "https://free-api-live-football-data.p.rapidapi.com/football-matches-search"
-    headers = {
-        "x-rapidapi-host": "free-api-live-football-data.p.rapidapi.com",
-        "x-rapidapi-key": rapidapi_key,
-    }
-    params = {"search": "Real Madrid"}
-
-    logger.info("Calling RapidAPI football search for Real Madrid")
-    try:
-        resp = http_requests.get(url, headers=headers, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        logger.error("Football API error: %s", exc)
-        return "Couldn't fetch Real Madrid data right now — try again later."
-
-    # Log the raw response keys so we can debug future shape changes
-    logger.info("Football API raw response keys: %s", list(data.keys()) if isinstance(data, dict) else type(data).__name__)
-
-    # Robustly extract a list from whatever shape the API returned
-    matches = _extract_list(data)
-
-    if not matches:
-        logger.warning("No match list found in API response: %s", str(data)[:300])
-        return "No Real Madrid matches found in the API response."
-
-    logger.info("Found %d match entries from football API", len(matches))
-    lines = ["⚽ Real Madrid — latest matches:"]
-    for match in matches[:8]:  # cap at 8 to keep the WhatsApp message short
-        home   = match.get("home_name") or match.get("homeTeam", {}).get("name", "?")
-        away   = match.get("away_name") or match.get("awayTeam", {}).get("name", "?")
-        score  = match.get("score")     or match.get("result", "vs")
-        date   = match.get("date")      or match.get("event_date", "")
-        status = match.get("status", "") or match.get("event_status", "")
-        lines.append(f"  {home} {score} {away}  [{date}] {status}".strip())
-
-    return "\n".join(lines)
 
 
 # ── Google Calendar helper ─────────────────────────────────────────────────────
@@ -272,6 +252,48 @@ def get_upcoming_events(max_results=10):
     return summary
 
 
+def add_calendar_event(title: str, date: str, time: str, duration_minutes: int = 60) -> str:
+    """Add a single event to the user's primary Google Calendar."""
+    logger.info("add_calendar_event called: title=%r date=%r time=%r duration=%r",
+                title, date, time, duration_minutes)
+    try:
+        # Normalise time → zero-padded HH:MM (handles "9:00", "10:00:00", "21:30", etc.)
+        parts = time.strip().split(":")
+        time_clean = f"{int(parts[0]):02d}:{parts[1][:2]}"
+        start_naive = datetime.datetime.fromisoformat(f"{date.strip()}T{time_clean}")
+        # Treat as local time and attach the system timezone
+        start_local = start_naive.astimezone()
+        end_local = start_local + datetime.timedelta(minutes=int(duration_minutes))
+    except (ValueError, TypeError) as exc:
+        logger.error("Date/time parse error: %s", exc)
+        return f"❌ Couldn't parse date/time (got date='{date}', time='{time}'): {exc}"
+
+    try:
+        creds = None
+        if os.path.exists('token.json'):
+            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        if not creds or not creds.valid:
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+
+        service = build('calendar', 'v3', credentials=creds)
+        event_body = {
+            'summary': title,
+            'start': {'dateTime': start_local.isoformat()},
+            'end':   {'dateTime': end_local.isoformat()},
+        }
+        created = service.events().insert(calendarId='primary', body=event_body).execute()
+        logger.info("Created calendar event '%s': %s", title, created.get('htmlLink'))
+        friendly_time = start_local.strftime("%A %d %b, %H:%M")
+        return f"✅ Added '{title}' on {friendly_time} ({duration_minutes} min)"
+
+    except Exception as exc:
+        logger.error("Failed to create calendar event: %s", exc)
+        return f"❌ Failed to add event: {exc}"
+
+
 # ── Health-check endpoint ──────────────────────────────────────────────────────
 @app.route("/whatsapp", methods=['GET'])
 def health_check():
@@ -281,4 +303,5 @@ def health_check():
 
 if __name__ == "__main__":
     logger.info("Starting TheChamp Flask server on port 5000")
+    real_madrid.start_scheduler()
     app.run(port=5000, debug=True)

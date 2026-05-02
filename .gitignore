@@ -4,8 +4,19 @@ venv/
 env/
 ENV/
 
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
 # Secrets
 .env
+.env.local
 
 # JSON credentials / tokens
 .json
@@ -14,3 +25,9 @@ json
 
 # Log files
 *.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
