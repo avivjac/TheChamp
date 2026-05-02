@@ -13,6 +13,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 import real_madrid
+import database
 
 # ── Logging setup — console + rotating file ───────────────────────────────────
 _log_formatter = logging.Formatter(
@@ -61,11 +62,13 @@ def _system_prompt() -> str:
         f"You are 'TheChamp', Aviv's personal WhatsApp assistant. "
         f"Aviv is a CS student who loves Real Madrid. "
         f"Today is {today}. "
-        f"Reply short and casual — like a friend texting back. No bullet lists, no over-explaining. "
+        f"Reply short and casual — like a friend texting back. Don't over-explain. "
         f"You understand both Hebrew and English; always reply in the same language Aviv wrote in. "
+        f"When a tool returns a formatted list or structured result, send it to the user exactly as-is — do not paraphrase or summarise it into a sentence. "
         f"Use tools proactively: call add_calendar_event whenever Aviv wants to schedule anything, "
         f"get_calendar_events when he asks about his schedule, "
-        f"and get_real_madrid_updates for anything Real Madrid."
+        f"get_real_madrid_updates for anything Real Madrid, "
+        f"and the shopping list tools when he mentions groceries or a shopping list."
     )
 
 
@@ -121,6 +124,52 @@ tools = [
             },
             "required": ["title", "date", "time"]
         }
+    },
+    {
+        "name": "add_to_shopping_list",
+        "description": (
+            "Add one or more items to the shopping list. "
+            "Use this whenever Aviv says he needs to buy something or wants to add to the list. "
+            "Pass all items in a single call as a list."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of items to add (e.g. ['milk', 'eggs', 'bread'])."
+                }
+            },
+            "required": ["items"]
+        }
+    },
+    {
+        "name": "view_shopping_list",
+        "description": "Show the current shopping list. Use when Aviv asks what's on the list. Send the tool result directly to the user without any changes.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "remove_from_shopping_list",
+        "description": (
+            "Remove a single item from the shopping list (marks it as bought). "
+            "Use when Aviv says he bought something or wants to remove an item."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item": {
+                    "type": "string",
+                    "description": "The item name to remove."
+                }
+            },
+            "required": ["item"]
+        }
+    },
+    {
+        "name": "clear_shopping_list",
+        "description": "Delete all items from the shopping list. Use only when Aviv explicitly asks to clear or empty the whole list.",
+        "input_schema": {"type": "object", "properties": {}}
     }
 ]
 
@@ -164,6 +213,14 @@ def whatsapp_reply():
                     time=inp["time"],
                     duration_minutes=inp.get("duration_minutes", 60),
                 )
+            elif tool_use.name == "add_to_shopping_list":
+                observation = database.add_shopping_items(tool_use.input["items"])
+            elif tool_use.name == "view_shopping_list":
+                observation = database.get_shopping_list()
+            elif tool_use.name == "remove_from_shopping_list":
+                observation = database.remove_shopping_item(tool_use.input["item"])
+            elif tool_use.name == "clear_shopping_list":
+                observation = database.clear_shopping_list()
             else:
                 observation = f"Tool '{tool_use.name}' is not implemented."
 

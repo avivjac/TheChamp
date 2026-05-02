@@ -3,7 +3,10 @@ import logging
 import datetime
 import requests
 
+from zoneinfo import ZoneInfo
+
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 # Google Calendar imports (re-uses the same token.json as app.py)
@@ -440,20 +443,88 @@ def _check_todays_game():
         _job_live(match_id)
 
 
+# ── Morning briefing ──────────────────────────────────────────────────────────
+
+def send_morning_briefing():
+    """
+    Sends a daily WhatsApp briefing at 08:00 Israel time with:
+      - Today's events from the primary Google Calendar
+      - Real Madrid game if there is one today
+    """
+    today = datetime.date.today()
+    day_label = today.strftime("%A, %d %B")
+    lines = [f"☀️ *Good morning Aviv!*", f"📆 {day_label}", ""]
+
+    # ── Today's calendar events ───────────────────────────────────────────────
+    try:
+        service = _get_calendar_service()
+        day_start = datetime.datetime(today.year, today.month, today.day,
+                                      tzinfo=datetime.timezone.utc)
+        day_end = day_start + datetime.timedelta(days=1)
+
+        result = service.events().list(
+            calendarId="primary",
+            timeMin=day_start.isoformat(),
+            timeMax=day_end.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute()
+
+        events = result.get("items", [])
+        if events:
+            lines.append("📅 *Today's schedule:*")
+            for event in events:
+                start_raw = event["start"].get("dateTime") or event["start"].get("date")
+                title = event.get("summary", "?")
+                if "T" in start_raw:
+                    time_str = _local_time(_parse_event_dt(start_raw))
+                    lines.append(f"  • {time_str} — {title}")
+                else:
+                    lines.append(f"  • {title} (all day)")
+        else:
+            lines.append("📅 No events scheduled today.")
+
+    except Exception as exc:
+        logger.error("Morning briefing — calendar error: %s", exc)
+        lines.append("📅 (Couldn't load calendar)")
+
+    # ── Real Madrid game ──────────────────────────────────────────────────────
+    game = get_todays_game_from_rm_calendar()
+    if game:
+        kickoff_utc, title = game
+        lines.append("")
+        lines.append("⚽ *Real Madrid game today!*")
+        lines.append(f"  🕐 Kick-off: {_local_time(kickoff_utc)}")
+        lines.append(f"  🏆 {title}")
+
+    send_whatsapp_notification("\n".join(lines))
+    logger.info("Morning briefing sent")
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 def start_scheduler():
     """
     Initialise and start the APScheduler background scheduler.
     Call this once when the Flask app starts.
     """
+    israel = ZoneInfo("Asia/Jerusalem")
+
+    # Morning briefing — 08:00 Israel time every day
+    _scheduler.add_job(
+        send_morning_briefing,
+        CronTrigger(hour=8, minute=0, timezone=israel),
+        id="morning_briefing",
+        replace_existing=True,
+    )
+
+    # Game-day check — 08:00 UTC (schedules the 3 match notifications)
     _scheduler.add_job(
         _check_todays_game,
-        "cron",
-        hour=8,
-        minute=0,
+        CronTrigger(hour=8, minute=0, timezone=ZoneInfo("UTC")),
         id="daily_game_check",
         replace_existing=True,
     )
+
     _scheduler.start()
-    logger.info("Real Madrid notification scheduler started (daily check at 08:00 UTC)")
-    _check_todays_game()  # also run immediately so games detected even before 08:00
+    logger.info("Scheduler started — morning briefing at 08:00 Israel, game check at 08:00 UTC")
+    _check_todays_game()  # run immediately on startup to catch games before the daily window
