@@ -2,6 +2,9 @@ import os
 import logging
 import datetime
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from zoneinfo import ZoneInfo
 
@@ -222,7 +225,7 @@ def get_todays_rm_event_from_calendar() -> tuple | None:
 def _api_headers() -> dict:
     return {
         "x-rapidapi-host": "free-api-live-football-data.p.rapidapi.com",
-        "x-rapidapi-key": os.environ["FOOTBALL_API_KEY"],
+        "x-rapidapi-key": os.environ.get("FOOTBALL_API_KEY", ""),
     }
 
 

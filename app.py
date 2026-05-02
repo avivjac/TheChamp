@@ -2,10 +2,14 @@ import os
 import logging
 import logging.handlers
 import datetime
+from dotenv import load_dotenv
+
+# Load env vars first — before any project imports so every module sees them
+load_dotenv()
+
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from anthropic import Anthropic
-from dotenv import load_dotenv
 
 import real_madrid
 import database
@@ -32,13 +36,9 @@ _file_handler.setFormatter(_log_formatter)
 logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _file_handler])
 logger = logging.getLogger(__name__)
 
-# ── Load environment variables from .env ───────────────────────────────────────
-load_dotenv()
-logger.info("Environment variables loaded from .env")
-
 api_key = os.environ.get("ANTHROPIC_API_KEY")
 if not api_key:
-    raise ValueError("ANTHROPIC_API_KEY not found in .env — check the file!")
+    raise ValueError("ANTHROPIC_API_KEY is not set. Add it to .env (local) or Railway Variables (deployed).")
 logger.info("Anthropic API key found")
 
 app = Flask(__name__)

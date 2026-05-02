@@ -20,7 +20,10 @@ Supabase table setup — run this once in the SQL editor:
 
 import os
 import logging
+from dotenv import load_dotenv
 from supabase import create_client, Client
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,10 @@ def get_client() -> Client:
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
         if not url or not key:
-            raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+            raise RuntimeError(
+                "SUPABASE_URL and SUPABASE_KEY are not set. "
+                "Add them to .env (local) or Railway Variables (deployed)."
+            )
         _client = create_client(url, key)
         logger.info("Supabase client initialised")
     return _client
