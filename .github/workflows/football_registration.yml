@@ -1,0 +1,23 @@
+name: Football Registration
+
+on:
+  schedule:
+    # 17:00 UTC = 20:00 Israel time (UTC+3, summer / daylight saving)
+    # Change to 18:00 UTC in winter (UTC+2) — around late October to late March
+    - cron: '0 17 * * 3'  # every Wednesday
+  workflow_dispatch: # allows manual trigger from GitHub UI
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger football registration
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.APP_URL }}/trigger/football-registration" \
+            -H "X-Trigger-Token: ${{ secrets.TRIGGER_TOKEN }}")
+          echo "Response: $response"
+          if [ "$response" != "200" ]; then
+            echo "Failed with HTTP $response"
+            exit 1
+          fi

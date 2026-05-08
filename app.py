@@ -60,7 +60,8 @@ def _system_prompt() -> str:
         f"Use tools proactively: call add_calendar_event whenever Aviv wants to schedule anything, "
         f"get_calendar_events when he asks about his schedule, "
         f"get_real_madrid_updates for anything Real Madrid, "
-        f"and the shopping list tools when he mentions groceries or a shopping list."
+        f"the shopping list tools when he mentions groceries or a shopping list, "
+        f"and the to-do list tools when he mentions tasks, things to do, or his to-do list."
     )
 
 
@@ -162,6 +163,67 @@ tools = [
         "name": "clear_shopping_list",
         "description": "Delete all items from the shopping list. Use only when Aviv explicitly asks to clear or empty the whole list.",
         "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "add_todo",
+        "description": (
+            "Add a task to Aviv's to-do list. "
+            "Use when he says he needs to do something, wants to remember a task, or asks to add to his to-do list. "
+            "Optionally accepts a due date — convert natural language ('tomorrow', 'Friday') to YYYY-MM-DD."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The task description."
+                },
+                "due_date": {
+                    "type": "string",
+                    "description": "Optional due date in YYYY-MM-DD format."
+                }
+            },
+            "required": ["task"]
+        }
+    },
+    {
+        "name": "view_todos",
+        "description": "Show Aviv's pending to-do list. Use when he asks what he needs to do or wants to see his tasks. Send the tool result directly to the user without changes.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "complete_todo",
+        "description": (
+            "Mark a to-do task as done. "
+            "Use when Aviv says he finished, completed, or did something on his to-do list."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The task name to mark as done (partial match)."
+                }
+            },
+            "required": ["task"]
+        }
+    },
+    {
+        "name": "remove_todo",
+        "description": (
+            "Permanently delete a task from the to-do list. "
+            "Use when Aviv wants to remove a task entirely rather than mark it done."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The task name to remove (partial match)."
+                }
+            },
+            "required": ["task"]
+        }
     }
 ]
 
@@ -213,6 +275,17 @@ def whatsapp_reply():
                 observation = database.remove_shopping_item(tool_use.input["item"])
             elif tool_use.name == "clear_shopping_list":
                 observation = database.clear_shopping_list()
+            elif tool_use.name == "add_todo":
+                observation = database.add_todo(
+                    task=tool_use.input["task"],
+                    due_date=tool_use.input.get("due_date"),
+                )
+            elif tool_use.name == "view_todos":
+                observation = database.get_todos()
+            elif tool_use.name == "complete_todo":
+                observation = database.complete_todo(tool_use.input["task"])
+            elif tool_use.name == "remove_todo":
+                observation = database.remove_todo(tool_use.input["task"])
             else:
                 observation = f"Tool '{tool_use.name}' is not implemented."
 
@@ -314,6 +387,33 @@ def add_calendar_event(title: str, date: str, time: str, duration_minutes: int =
 def health_check():
     logger.info("Health check requested")
     return "✅ TheChamp bot is alive!", 200
+
+
+# ── Scheduled trigger endpoints (called by GitHub Actions) ────────────────────
+def _check_trigger_token() -> bool:
+    expected = os.environ.get("TRIGGER_TOKEN", "")
+    return bool(expected) and request.headers.get("X-Trigger-Token", "") == expected
+
+
+@app.route("/trigger/morning-briefing", methods=['POST'])
+def trigger_morning_briefing():
+    if not _check_trigger_token():
+        logger.warning("Unauthorized trigger attempt")
+        return "Unauthorized", 401
+    logger.info("Morning briefing triggered via HTTP")
+    real_madrid.send_morning_briefing()
+    return "OK", 200
+
+
+@app.route("/trigger/football-registration", methods=['POST'])
+def trigger_football_registration():
+    if not _check_trigger_token():
+        logger.warning("Unauthorized trigger attempt")
+        return "Unauthorized", 401
+    import football_registration
+    logger.info("Football registration triggered via HTTP")
+    result = football_registration.register_for_football()
+    return result, 200
 
 
 real_madrid.start_scheduler()

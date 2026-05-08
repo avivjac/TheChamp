@@ -487,8 +487,11 @@ def send_morning_briefing():
     """
     Sends a daily WhatsApp briefing at 08:00 Israel time with:
       - Today's events from the primary Google Calendar
+      - To-do list items (due today or with no due date)
       - Real Madrid game if there is one today
     """
+    import database
+
     today = datetime.date.today()
     day_label = today.strftime("%A, %d %B")
     lines = [f"☀️ *Good morning Aviv!*", f"📆 {day_label}", ""]
@@ -525,6 +528,15 @@ def send_morning_briefing():
     except Exception as exc:
         logger.error("Morning briefing — calendar error: %s", exc)
         lines.append("📅 (Couldn't load calendar)")
+
+    # ── To-do list ────────────────────────────────────────────────────────────
+    todos = database.get_todays_todos()
+    if todos:
+        lines.append("")
+        lines.append("📝 *To-do list:*")
+        for i, t in enumerate(todos):
+            suffix = f" — due {t['due_date']}" if t.get("due_date") else ""
+            lines.append(f"  {i + 1}. {t['task']}{suffix}")
 
     # ── Real Madrid game ──────────────────────────────────────────────────────
     game = get_todays_game_from_rm_calendar()

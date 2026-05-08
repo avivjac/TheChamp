@@ -16,6 +16,14 @@ Supabase table setup — run this once in the SQL editor:
         added_at  TIMESTAMPTZ DEFAULT NOW(),
         bought    BOOLEAN DEFAULT FALSE
     );
+
+    CREATE TABLE todo_list (
+        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        task       TEXT NOT NULL,
+        due_date   DATE,
+        done       BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
 """
 
 import os
@@ -121,3 +129,116 @@ def clear_shopping_list() -> str:
     except Exception as exc:
         logger.error("clear_shopping_list failed: %s", exc)
         return f"❌ Failed to clear list: {exc}"
+
+
+# ── To-do list ─────────────────────────────────────────────────────────────────
+
+def add_todo(task: str, due_date: str | None = None) -> str:
+    """Insert a new task into the to-do list."""
+    row: dict = {"task": task.strip()}
+    if due_date:
+        row["due_date"] = due_date
+    try:
+        get_client().table("todo_list").insert(row).execute()
+        suffix = f" (due {due_date})" if due_date else ""
+        logger.info("Added to-do: %s%s", task, suffix)
+        return f"✅ Added: {task}{suffix}"
+    except Exception as exc:
+        logger.error("add_todo failed: %s", exc)
+        return f"❌ Failed to add task: {exc}"
+
+
+def get_todos() -> str:
+    """Return all pending tasks formatted for WhatsApp."""
+    try:
+        result = (
+            get_client()
+            .table("todo_list")
+            .select("task, due_date")
+            .eq("done", False)
+            .order("created_at")
+            .execute()
+        )
+        items = result.data
+        if not items:
+            return "✅ To-do list is empty!"
+        lines = ["📝 *To-do list*", ""]
+        for i, r in enumerate(items):
+            suffix = f" — due {r['due_date']}" if r.get("due_date") else ""
+            lines.append(f"{i + 1}. {r['task']}{suffix}")
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.error("get_todos failed: %s", exc)
+        return f"❌ Couldn't fetch to-do list: {exc}"
+
+
+def complete_todo(task: str) -> str:
+    """Mark matching tasks as done (case-insensitive partial match)."""
+    try:
+        result = (
+            get_client()
+            .table("todo_list")
+            .update({"done": True})
+            .ilike("task", f"%{task.strip()}%")
+            .eq("done", False)
+            .execute()
+        )
+        done = result.data
+        if not done:
+            return f"❌ '{task}' not found in the to-do list."
+        names = ", ".join(r["task"] for r in done)
+        logger.info("Completed to-do: %s", names)
+        return f"✅ Done: {names}"
+    except Exception as exc:
+        logger.error("complete_todo failed: %s", exc)
+        return f"❌ Failed to complete '{task}': {exc}"
+
+
+def remove_todo(task: str) -> str:
+    """Hard-delete a task from the to-do list (case-insensitive partial match)."""
+    try:
+        result = (
+            get_client()
+            .table("todo_list")
+            .delete()
+            .ilike("task", f"%{task.strip()}%")
+            .execute()
+        )
+        removed = result.data
+        if not removed:
+            return f"❌ '{task}' not found in the to-do list."
+        names = ", ".join(r["task"] for r in removed)
+        logger.info("Removed to-do: %s", names)
+        return f"🗑️ Removed: {names}"
+    except Exception as exc:
+        logger.error("remove_todo failed: %s", exc)
+        return f"❌ Failed to remove '{task}': {exc}"
+
+
+def get_todays_todos() -> list[dict]:
+    """Return pending tasks due today or with no due date. Used by the morning briefing."""
+    import datetime
+    today = datetime.date.today().isoformat()
+    try:
+        due_today = (
+            get_client()
+            .table("todo_list")
+            .select("task, due_date")
+            .eq("done", False)
+            .eq("due_date", today)
+            .order("created_at")
+            .execute()
+        ).data
+        no_due_date = (
+            get_client()
+            .table("todo_list")
+            .select("task, due_date")
+            .eq("done", False)
+            .is_("due_date", "null")
+            .order("created_at")
+            .execute()
+        ).data
+        return due_today + no_due_date
+    except Exception as exc:
+        logger.error("get_todays_todos failed: %s", exc)
+        return []

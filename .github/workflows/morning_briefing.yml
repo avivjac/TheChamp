@@ -1,0 +1,23 @@
+name: Morning Briefing
+
+on:
+  schedule:
+    # 05:00 UTC = 08:00 Israel time (UTC+3, summer / daylight saving)
+    # Change to 06:00 UTC in winter (UTC+2) — around late October to late March
+    - cron: '0 5 * * *'
+  workflow_dispatch: # allows manual trigger from GitHub UI
+
+jobs:
+  send-briefing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger morning briefing
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.APP_URL }}/trigger/morning-briefing" \
+            -H "X-Trigger-Token: ${{ secrets.TRIGGER_TOKEN }}")
+          echo "Response: $response"
+          if [ "$response" != "200" ]; then
+            echo "Failed with HTTP $response"
+            exit 1
+          fi
